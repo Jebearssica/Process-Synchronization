@@ -17,6 +17,7 @@ enum Human_Status { Return, Sign, Buy, Collect }; //顾客的四种状态
 //互斥量初始化
 std::mutex In, Out;                               //出入口
 std::mutex Wnd[MAX_WINDOW_AUTO + MAX_WINDOW_HUM]; //八个窗口
+std::mutex Mutex_Number_In_Sale;                  //大厅人数互斥量
 
 //创建一个休眠类
 std::condition_variable CV;
@@ -35,6 +36,7 @@ int Customer_In(int &Number) {                    //顾客线程进入函数
   std::uniform_int_distribution<> u_Status(Return, Collect);
   std::random_device e;                           //以系统熵作为随机种子的引擎
   std::cout << "*******************" << std::endl;
+  std::cout << "线程ID：" << std::this_thread::get_id() << std::endl;
   std::cout << "第" << Number << "位顾客进入" << std::endl;
   std::cout << "进入时间(模拟量)：" << u_Number(e) << std::endl;
   std::cout << "状态：";
@@ -57,14 +59,19 @@ int Customer_In(int &Number) {                    //顾客线程进入函数
   }
 }
 
+//顾客线程主函数
 void Customer(int &Number_People, int Number_Served, int *Number_Queue) {
-  std::lock_guard<std::mutex> lockGuard(In);            //自动锁 锁入口
+  std::lock_guard<std::mutex> lockGuard(In);         //自动锁 锁入口
+  //输出线程ID
   std::cout << "线程生成 ID：" << std::this_thread::get_id() << std::endl;
+  //大厅内顾客人数上锁
+  std::unique_lock<std::mutex> loc(Mutex_Number_In_Sale);
   if (Number_People < MAX_NUMBER_IN_SALE) {
     Number_People++;
     int Status = Customer_In(Number_Served);        //顾客进入
     //In.unlock;
-                                                    //判断选择队列
+
+    //判断选择队列
     int Result;
     if (Status == -1) {
       return;
@@ -84,10 +91,13 @@ void Customer(int &Number_People, int Number_Served, int *Number_Queue) {
   else {
     //In.unlock;
     std::cout << "进入等待" << std::endl;
+    //顾客线程等待大厅人数变少进入
+    CV.wait(loc, [Number_People] {return Number_People < MAX_NUMBER_IN_SALE; });
   }
+  
 }
 
-int Window(const int Number_Wnd, int &Number) {
+int Window(const int Number_Wnd, int &Number,int &Number_In_Sale) {
   std::uniform_int_distribution<> u_Time(0, 250);
   std::random_device e;
   int Offset = 0;
@@ -102,6 +112,7 @@ int Window(const int Number_Wnd, int &Number) {
       }
       std::lock_guard<std::mutex> lockGuard(Wnd[Number_Wnd]); //上锁 改变队列人数
       Number--;
+      Number_In_Sale--;
     }
     else {
       //窗口等待
@@ -134,20 +145,21 @@ int main() {
 
   //人工窗口线程
   for (size_t i = 0; i < MAX_WINDOW_HUM; i++) {
-    Wnd_Hum[i] = std::thread(Window, i, std::ref(Number_Queue[i]));
+    Wnd_Hum[i] = std::thread(Window, i, std::ref(Number_Queue[i]), std::ref(Number_People));
   }
   //自动窗口线程
   for (size_t i = 0; i < MAX_WINDOW_AUTO; i++) {
-    Wnd_Auto[i] = std::thread(Window, i, std::ref(Number_Queue[MAX_WINDOW_HUM + i]));
+    Wnd_Auto[i] = std::thread(Window, i, std::ref(Number_Queue[MAX_WINDOW_HUM + i]), std::ref(Number_People));
   }
   //顾客线程
   while (Number_Served < MAX_NUMBER_SERVE) {
     Customers[Number_Served] = std::thread(Customer, std::ref(Number_People), Number_Served, Number_Queue);
     Number_Served++;
   }
-  //顾客线程等待进入
+  //顾客线程排队等待进入
   while (Number_Served < MAX_NUMBER_SERVE) {
     if (Number_People <= MAX_NUMBER_IN_SALE) {
+      //等待上一个顾客进入
       Customers[Number_Served].join();
       Sleep(TIME_CUSTOMER_CREATE + u_Time(e));   //每(100+Offset)ms产生一个顾客
       Number_Served++;
